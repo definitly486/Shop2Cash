@@ -912,6 +912,11 @@ class App:
 
     def analyze_gnucash(self):
         """Готовит импорт; только этот отдельный шаг читает файл GnuCash."""
+        if not self.gnucash_path.get().strip():
+            warning = "Не указан файл GnuCash. Выберите файл GnuCash перед подготовкой импорта."
+            self.status.set("Импорт не подготовлен: не указан файл GnuCash.")
+            messagebox.showwarning("Не выбран файл GnuCash", warning)
+            return
         self.table.heading("account", text="Счёт GnuCash")
         self._analyze_gnucash_impl()
 
@@ -1067,6 +1072,13 @@ class App:
 
     def save(self):
         if not self.analysis:
+            return
+        if not self.gnucash_path.get().strip():
+            warning = "Не указан файл GnuCash. Выберите файл GnuCash перед сохранением импорта."
+            messagebox.showwarning("Не выбран файл GnuCash", warning)
+            self.status.set("Импорт отменён: не указан файл GnuCash.")
+            self.save_btn.config(state="disabled")
+            self.analysis = None
             return
         if not self.ozon_card_var.get():
             messagebox.showwarning(
