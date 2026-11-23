@@ -1,9 +1,10 @@
-# SPAR + X5 Club → GnuCash
+# SPAR + X5 Club + АШАН → GnuCash
 
 Объединённый набор скриптов для загрузки истории покупок из:
 
 - **SPAR** (myspar.ru)
 - **X5 Club** (Пятёрочка / Перекрёсток)
+- **АШАН** (My Auchan / история покупок и детали чеков)
 
 и импорта чеков в GnuCash.
 
@@ -15,7 +16,8 @@
 | `spar_history.py` | Просмотр истории SPAR из локальной базы |
 | `spar_export.py` | Экспорт SPAR в CSV/JSON |
 | `x5_api.py` | Клиент X5 Club (загрузка истории чеков) |
-| `gnucash_import.py` | GUI-импортёр чеков SPAR и X5 в GnuCash |
+| `auchan_api.py` | Клиент АШАН (история и отдельная загрузка деталей чеков) |
+| `gnucash_import.py` | GUI-импортёр чеков SPAR, X5 Club и АШАН в GnuCash |
 
 ## Быстрый старт
 
@@ -34,7 +36,23 @@ python spar_api.py sync --json    # загрузка покупок
 python x5_api.py --json
 ```
 
-### 3. Импорт в GnuCash
+### 3. АШАН
+
+Сначала выполните SMS-вход существующим скриптом из `AuchanReverseEngineering` (он сохраняет Token80 в `~/.config/auchan-purchases/session.json`):
+
+```bash
+python /путь/к/auchan_purchases.py
+```
+
+Затем Shop2Cash использует эту сохранённую сессию, загружает историю и запрашивает подробности каждого чека:
+
+```bash
+python auchan_api.py --json auchan_receipts.json
+```
+
+Для АШАН не нужно повторно вводить пароль или SMS, пока сохранённый Token80 действителен. При HTTP 401 повторите SMS-вход исходным скриптом. Файл сессии не копируется в Shop2Cash.
+
+### 4. Импорт в GnuCash
 
 ```bash
 python gnucash_import.py
@@ -43,6 +61,7 @@ python gnucash_import.py
 В окне можно:
 - Загрузить чеки из SPAR одной кнопкой
 - Загрузить чеки из X5 Club другой кнопкой
+- Загрузить историю и детали чеков АШАН отдельной кнопкой
 - Или указать уже сохранённый JSON-файл
 - Проверить и создать проводки в GnuCash
 
