@@ -940,6 +940,7 @@ class App:
             parents = find_category_parents(accounts)
             children = []
             for parent in parents:
+                children.append(parent)
                 children.extend(product_accounts(accounts, parent["id"]))
             # На случай общих/пересекающихся деревьев исключаем повторные GUID.
             children = list({account["id"]: account for account in children}.values())
