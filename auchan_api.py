@@ -161,51 +161,91 @@ def fetch_all(client: AuchanClient, limit: int) -> tuple[dict, list[dict]]:
     return first_page, rows
 
 def normalize_receipts(client: AuchanClient, rows: list[dict], fetch_details: bool) -> list[dict]:
-    receipts, seen = [], set()
+    """Преобразует записи истории тем же способом, что и myauchan.
+
+    Важные особенности API:
+    - trnNo — отображаемый номер кассовой операции, а не transactionId.
+    - order_details уже находится в записи истории; не нужно повторно
+      запрашивать её через filter.chequeNumber=trnNo.
+    - transactionId используется для устранения повторов истории.
+    """
+    receipts = []
+    seen_transactions = set()
+    used_check_numbers = set()
+
     for row in rows:
-        number = first(row, "trnNo", "TrnNo", "trn_no", "chequeNumber", "ChequeNumber",
-                       "transactionNumber", "TransactionNumber", "number", "Number", "id", "Id")
-        if number is None:
+        # Поля и порядок чтения повторяют рабочий myauchan.
+        number = first(row, "trnNo", "TrnNo", "transactionNumber",
+                       "TransactionNumber", "chequeNumber", "ChequeNumber",
+                       "number", "Number")
+        till = first(row, "till", "Till")
+        transaction_id = first(row, "transactionId", "TransactionId")
+        created = first(row, "date", "Date", "created", "Created",
+                        "dateCreate", "DateCreate")
+        store = first(row, "locationName", "LocationName", "location", "Location",
+                      "storeName", "StoreName")
+
+        # transactionId — идентификатор записи. trnNo может повторяться
+        # между кассами/датами и сам по себе не годится для дедупликации.
+        if transaction_id not in (None, ""):
+            identity = ("transactionId", str(transaction_id).strip())
+        else:
+            identity = (
+                "fallback",
+                str(number or "").strip(),
+                str(till or "").strip(),
+                str(created or "").strip(),
+                str(store or "").strip(),
+            )
+        if identity in seen_transactions:
             continue
-        number = str(number).strip()
-        if not number or number in seen:
+        seen_transactions.add(identity)
+
+        # Номер для отображения сохраняем как в myauchan (trnNo).
+        # Если такой номер уже встретился у другой транзакции, добавляем
+        # transactionId, чтобы чеки не сливались в GnuCash.
+        display_number = str(number or transaction_id or "").strip()
+        if not display_number:
             continue
-        seen.add(number)
-        detail = row
-        if fetch_details:
-            try:
-                response = client.post_history(0, 1, number)
-                detail_rows = unwrap_history(response)
-                if detail_rows:
-                    detail = detail_rows[0]
-            except Exception as exc:
-                print(f"Предупреждение: детали чека {number} не загружены: {exc}", file=sys.stderr)
-        order = first(detail, "order_details", "orderDetails", "OrderDetails")
-        candidates = items_from(order if order is not None else detail)
-        if not candidates:
-            candidates = items_from(row)
-        products = [normalized for x in candidates
-                    if (normalized := normalize_item(x)) is not None]
-        created = first(detail, "date", "Date", "created", "Created",
-                        "dateCreate", "DateCreate") or first(row, "date", "Date", "created", "Created")
-        amount = first(detail, "totalValue", "TotalValue", "amount", "Amount",
-                       "sum", "Sum") or first(row, "totalValue", "TotalValue", "amount", "Amount")
-        store = first(detail, "locationName", "LocationName", "location", "Location",
-                      "storeName", "StoreName") or first(row, "locationName", "LocationName", "location", "Location")
-        if not products:
-            print(f"Предупреждение: в чеке {number} не найдены товарные позиции; чек будет пропущен импортёром.", file=sys.stderr)
+        check_number = display_number
+        if check_number in used_check_numbers:
+            suffix = str(transaction_id or f"{till}-{created}").strip()
+            check_number = f"{display_number}-{suffix}"
+        used_check_numbers.add(check_number)
+
+        # myauchan печатает товары прямо из order_details в истории.
+        # Не делаем запрос filter.chequeNumber с trnNo: он может вернуть
+        # другую запись и привести к одинаковому составу разных чеков.
+        order = first(row, "order_details", "OrderDetails", "orderDetails")
+        candidates = items_from(order if order is not None else row)
+        products = [normalized for item in candidates
+                    if (normalized := normalize_item(item)) is not None]
+
+        amount = first(row, "totalValue", "TotalValue", "amount", "Amount",
+                       "sum", "Sum")
         receipts.append({
             "source": "AUCHAN",
-            "checkNum": f"AUCHAN-{number}",
-            "chequeNumber": number,
+            "checkNum": f"AUCHAN-{check_number}",
+            "chequeNumber": display_number,
+            "transactionId": transaction_id,
+            "trnNo": number,
+            "till": till,
             "created": created,
             "amountPromo": amount,
             "title": "АШАН",
             "nameTc": store or "АШАН",
-            "store_address": first(detail, "address", "Address", "locationAddress", "LocationAddress") or "",
+            "store_address": first(row, "address", "Address",
+                                   "locationAddress", "LocationAddress") or "",
             "items": products,
-            "raw": detail,
+            "raw": row,
         })
+
+        if not products:
+            print(
+                f"Предупреждение: в истории для чека {display_number} "
+                "нет order_details/products; отдельный запрос по trnNo не выполнялся.",
+                file=sys.stderr,
+            )
     return receipts
 
 def main():
