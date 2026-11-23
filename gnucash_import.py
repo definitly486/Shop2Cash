@@ -318,10 +318,13 @@ def transaction_check_ids(root):
         desc = node.findtext("trn:description", default="", namespaces=NS)
         m = re.search(r"\bчек\s*№\s*(\d+)\b", desc, flags=re.I)
         spar = re.search(r"\bSPAR\s*[—-]\s*покупка\s*#([\w-]+)", desc, flags=re.I)
+        auchan = re.search(r"\bАШАН\s*[—-]\s*чек\s*№\s*(AUCHAN-[\w-]+)", desc, flags=re.I)
         if m:
             found.add(m.group(1))
         if spar:
             found.add(f"SPAR-{spar.group(1)}")
+        if auchan:
+            found.add(auchan.group(1))
     return found
 
 def make_text(parent, prefix, tag, value, attrs=None):
