@@ -12,7 +12,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 import requests
 
 BASE = os.getenv("AUCHAN_LOYMAX_BASE", "https://mobile.auchan.ru/ecom").rstrip("/")
@@ -46,7 +46,7 @@ class AuchanClient:
             "Content-Type": "application/json",
         })
 
-    def post_history(self, offset: int, limit: int, cheque_number: str | None = None) -> dict:
+    def post_history(self, offset: int, limit: int, cheque_number: Optional[str] = None) -> dict:
         body = {
             "channel": "M",
             "pagination": {"offset": offset, "limit": min(limit, 10)},
@@ -188,7 +188,7 @@ def normalize_receipts(client: AuchanClient, rows: list[dict], fetch_details: bo
         receipts.append({
             "source": "AUCHAN",
             "checkNum": f"AUCHAN-{number}",
-            "auchанChequeNumber": number,
+            "chequeNumber": number,
             "created": created,
             "amountPromo": amount,
             "title": "АШАН",
