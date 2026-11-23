@@ -160,7 +160,7 @@ def fetch_all(client: AuchanClient, limit: int) -> tuple[dict, list[dict]]:
             total = total_count(page)
     return first_page, rows
 
-def normalize_receipts(client: AuchanClient, rows: list[dict], fetch_details: bool) -> list[dict]:
+def normalize_receipts(rows: list[dict]) -> list[dict]:
     """Преобразует записи истории тем же способом, что и myauchan.
 
     Важные особенности API:
@@ -252,7 +252,6 @@ def main():
     parser = argparse.ArgumentParser(description="Загрузка чеков АШАН для Shop2Cash/GnuCash")
     parser.add_argument("--all", action="store_true", help="загрузить всю историю (по умолчанию — также вся история)")
     parser.add_argument("--limit", type=int, default=10, help="размер страницы API, максимум 10")
-    parser.add_argument("--no-details", action="store_true", help="не запрашивать отдельно детали каждого чека")
     parser.add_argument("--json", dest="json_path", help="сохранить чеки в JSON-файл")
     args = parser.parse_args()
     if args.limit < 1 or args.limit > 10:
@@ -270,7 +269,7 @@ def main():
             f"ключи ответа=[{top_keys}]; ключи data=[{data_keys}]. "
             "Сверьте ответ API с AuchanReverseEngineering."
         )
-    receipts = normalize_receipts(client, rows, not args.no_details)
+    receipts = normalize_receipts(rows)
     if not receipts:
         sample_keys = ", ".join(map(str, rows[0].keys())) if rows else "нет записей"
         raise RuntimeError(
