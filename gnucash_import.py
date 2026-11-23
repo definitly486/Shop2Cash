@@ -359,6 +359,30 @@ def add_split(parent, account_id, amount_cents, memo=""):
         make_text(split, "split", "memo", memo)
     make_text(split, "split", "account", account_id, {"type": "guid"})
 
+def expand_item_units(item, account):
+    """Разбивает целое количество товара на отдельные позиции GnuCash."""
+    raw_quantity = item.get("quantity")
+    if raw_quantity in (None, ""):
+        return [(item, account)]
+    try:
+        quantity = Decimal(str(raw_quantity))
+    except Exception:
+        return [(item, account)]
+    if not quantity.is_finite() or quantity <= 1 or quantity != quantity.to_integral_value():
+        return [(item, account)]
+
+    total_cents = cents(item.get("pricePromo", item.get("priceRegular", "0")))
+    count = int(quantity)
+    base_cents, remainder = divmod(total_cents, count)
+    expanded = []
+    for index in range(count):
+        unit_item = dict(item)
+        unit_item["pricePromo"] = str(Decimal(base_cents + (1 if index < remainder else 0)) / 100)
+        unit_item.pop("quantity", None)
+        unit_item.pop("measure", None)
+        expanded.append((unit_item, account))
+    return expanded
+
 def fill_existing_transaction(receipt, existing, mapped):
     """Заполняет существующую банковскую проводку вместо создания новой."""
     txn = existing["txn"]
@@ -1041,12 +1065,15 @@ class App:
                     if account is None:
                         missing.append(item.get("name", "(без названия)"))
                     else:
-                        mapped.append((item, account))
-                        self.table.insert("", "end", values=(
-                            f"{check_num}: {item.get('name', '')}",
-                            account["name"],
-                            f"{Decimal(item_amount) / 100:.2f}",
-                        ))
+                        expanded_items = expand_item_units(item, account)
+                        mapped.extend(expanded_items)
+                        for unit_item, unit_account in expanded_items:
+                            unit_amount = cents(unit_item.get("pricePromo", unit_item.get("priceRegular", "0")))
+                            self.table.insert("", "end", values=(
+                                f"{check_num}: {unit_item.get('name', '')}",
+                                unit_account["name"],
+                                f"{Decimal(unit_amount) / 100:.2f}",
+                            ))
                 if missing:
                     self.log(f"{check_num}: не сопоставлены товары: {', '.join(missing)}")
                     skipped += 1
