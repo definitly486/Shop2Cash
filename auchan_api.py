@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Загрузка чеков My Auchan в формат Shop2Cash.
+
+Использует Token80 из ~/.config/auchan-purchases/session.json,
+созданный скриптом AuchanReverseEngineering/auchan_purchases.py.
+"""
+from __future__ import annotations
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Any
+import requests
+
+BASE = os.getenv("AUCHAN_LOYMAX_BASE", "https://mobile.auchan.ru/ecom").rstrip("/")
+CONFIG = Path(os.getenv("AUCHAN_CONFIG_DIR") or
+              (Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")) / "auchan-purchases")).expanduser()
+SESSION_FILE = CONFIG / "session.json"
+TIMEOUT = 35
+
+def load_token() -> str:
+    if not SESSION_FILE.is_file():
+        raise RuntimeError(
+            f"Нет сохранённой авторизации: {SESSION_FILE}. "
+            "Сначала выполните SMS-вход скриптом AuchanReverseEngineering/auchan_purchases.py."
+        )
+    try:
+        data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Не удалось прочитать сессию Auchan: {exc}") from exc
+    token = data.get("token80") if isinstance(data, dict) else None
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("В session.json отсутствует Token80. Повторите вход в Auchan.")
+    return token
+
+class AuchanClient:
+    def __init__(self, token: str):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "MyAuchan/4.1.2",
+            "Accept": "application/json",
+            "X-Token-CMD": token,
+            "Content-Type": "application/json",
+        })
+
+    def post_history(self, offset: int, limit: int, cheque_number: str | None = None) -> dict:
+        body = {
+            "channel": "M",
+            "pagination": {"offset": offset, "limit": min(limit, 10)},
+            "filter": {"chequeNumber": cheque_number} if cheque_number else {"id": None},
+        }
+        try:
+            response = self.session.post(
+                f"{BASE}/lk/loyalty/history", json=body, timeout=TIMEOUT
+            )
+            if response.status_code == 401:
+                raise RuntimeError("Token80 отклонён сервером (HTTP 401). Выполните повторный SMS-вход.")
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Ошибка запроса истории Auchan: {exc}") from exc
+        except ValueError as exc:
+            raise RuntimeError("Auchan вернул ответ, который не является JSON.") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError("Неожиданный формат ответа истории Auchan.")
+        return data
+
+def first(obj: dict, *keys):
+    for key in keys:
+        value = obj.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+def items_from(payload: Any) -> list[dict]:
+    """Находит товарные позиции в DTO и вложенных ответах API."""
+    if isinstance(payload, list):
+        for entry in payload:
+            found = items_from(entry)
+            if found:
+                return found
+    elif isinstance(payload, dict):
+        for key in ("products", "Products", "items", "Items", "basket", "Basket"):
+            value = payload.get(key)
+            if isinstance(value, list) and value and all(isinstance(x, dict) for x in value):
+                if any(first(x, "name", "Name", "title", "Title") for x in value):
+                    return value
+        for value in payload.values():
+            if isinstance(value, (dict, list)):
+                found = items_from(value)
+                if found:
+                    return found
+    return []
+
+def normalize_item(item: dict) -> dict | None:
+    name = first(item, "name", "Name", "title", "Title", "productName", "ProductName")
+    if not name:
+        return None
+    quantity = first(item, "quantity", "Quantity", "count", "Count") or 1
+    # In TransactionDetailsDto product.value is the line total.
+    value = first(item, "value", "Value", "sum", "Sum", "total", "Total",
+                  "totalValue", "TotalValue", "price", "Price")
+    if value is None:
+        return None
+    return {
+        "name": str(name).strip(),
+        "quantity": quantity,
+        "pricePromo": str(value),
+        "priceRegular": str(value),
+        "measure": first(item, "measure", "Measure", "unit", "Unit"),
+        "article": first(item, "code", "Code", "article", "Article"),
+    }
+
+def unwrap_history(payload: dict) -> list[dict]:
+    data = payload.get("data", payload.get("Data", {}))
+    if isinstance(data, dict):
+        rows = data.get("items", data.get("Items", []))
+        if isinstance(rows, list):
+            return [x for x in rows if isinstance(x, dict)]
+    return []
+
+def total_count(payload: dict):
+    meta = payload.get("meta", payload.get("Meta", {}))
+    pagination = meta.get("pagination", meta.get("Pagination", {})) if isinstance(meta, dict) else {}
+    value = pagination.get("total", pagination.get("Total")) if isinstance(pagination, dict) else None
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+def fetch_all(client: AuchanClient, limit: int) -> tuple[dict, list[dict]]:
+    first_page = client.post_history(0, limit)
+    rows = unwrap_history(first_page)
+    total = total_count(first_page)
+    offset = len(rows)
+    for _ in range(1000):
+        if not rows or (total is not None and len(rows) >= total):
+            break
+        page = client.post_history(offset, limit)
+        batch = unwrap_history(page)
+        if not batch:
+            break
+        rows.extend(batch)
+        offset += len(batch)
+        if total is None and len(batch) < min(limit, 10):
+            break
+        if total is None:
+            total = total_count(page)
+    return first_page, rows
+
+def normalize_receipts(client: AuchanClient, rows: list[dict], fetch_details: bool) -> list[dict]:
+    receipts, seen = [], set()
+    for row in rows:
+        number = first(row, "chequeNumber", "ChequeNumber", "transactionNumber",
+                       "TransactionNumber", "number", "Number", "id", "Id")
+        if number is None:
+            continue
+        number = str(number).strip()
+        if not number or number in seen:
+            continue
+        seen.add(number)
+        detail = row
+        if fetch_details:
+            try:
+                response = client.post_history(0, 1, number)
+                detail_rows = unwrap_history(response)
+                if detail_rows:
+                    detail = detail_rows[0]
+            except Exception as exc:
+                print(f"Предупреждение: детали чека {number} не загружены: {exc}", file=sys.stderr)
+        order = first(detail, "orderDetails", "OrderDetails")
+        candidates = items_from(order if order is not None else detail)
+        if not candidates:
+            candidates = items_from(row)
+        products = [normalized for x in candidates
+                    if (normalized := normalize_item(x)) is not None]
+        created = first(detail, "date", "Date", "created", "Created",
+                        "dateCreate", "DateCreate") or first(row, "date", "Date", "created", "Created")
+        amount = first(detail, "totalValue", "TotalValue", "amount", "Amount",
+                       "sum", "Sum") or first(row, "totalValue", "TotalValue", "amount", "Amount")
+        store = first(detail, "locationName", "LocationName", "location", "Location",
+                      "storeName", "StoreName") or first(row, "locationName", "LocationName", "location", "Location")
+        if not products:
+            print(f"Предупреждение: в чеке {number} не найдены товарные позиции; чек будет пропущен импортёром.", file=sys.stderr)
+        receipts.append({
+            "source": "AUCHAN",
+            "checkNum": f"AUCHAN-{number}",
+            "auchанChequeNumber": number,
+            "created": created,
+            "amountPromo": amount,
+            "title": "АШАН",
+            "nameTc": store or "АШАН",
+            "store_address": first(detail, "address", "Address", "locationAddress", "LocationAddress") or "",
+            "items": products,
+            "raw": detail,
+        })
+    return receipts
+
+def main():
+    parser = argparse.ArgumentParser(description="Загрузка чеков АШАН для Shop2Cash/GnuCash")
+    parser.add_argument("--all", action="store_true", help="загрузить всю историю (по умолчанию — также вся история)")
+    parser.add_argument("--limit", type=int, default=10, help="размер страницы API, максимум 10")
+    parser.add_argument("--no-details", action="store_true", help="не запрашивать отдельно детали каждого чека")
+    parser.add_argument("--json", dest="json_path", help="сохранить чеки в JSON-файл")
+    args = parser.parse_args()
+    if args.limit < 1 or args.limit > 10:
+        parser.error("--limit должен быть в диапазоне 1..10")
+    client = AuchanClient(load_token())
+    history, rows = fetch_all(client, args.limit)
+    receipts = normalize_receipts(client, rows, not args.no_details)
+    output = {"source": "AUCHAN", "history_count": len(rows), "receipts": receipts}
+    if args.json_path:
+        path = Path(args.json_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        print(f"JSON сохранён: {path}", file=sys.stderr)
+    else:
+        print(json.dumps(output, ensure_ascii=False, indent=2))
+    print(f"Получено чеков АШАН: {len(receipts)}", file=sys.stderr)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    except Exception as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        raise SystemExit(2)
