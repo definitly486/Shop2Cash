@@ -163,8 +163,8 @@ def fetch_all(client: AuchanClient, limit: int) -> tuple[dict, list[dict]]:
 def normalize_receipts(client: AuchanClient, rows: list[dict], fetch_details: bool) -> list[dict]:
     receipts, seen = [], set()
     for row in rows:
-        number = first(row, "chequeNumber", "ChequeNumber", "transactionNumber",
-                       "TransactionNumber", "number", "Number", "id", "Id")
+        number = first(row, "trnNo", "TrnNo", "trn_no", "chequeNumber", "ChequeNumber",
+                       "transactionNumber", "TransactionNumber", "number", "Number", "id", "Id")
         if number is None:
             continue
         number = str(number).strip()
@@ -180,7 +180,7 @@ def normalize_receipts(client: AuchanClient, rows: list[dict], fetch_details: bo
                     detail = detail_rows[0]
             except Exception as exc:
                 print(f"Предупреждение: детали чека {number} не загружены: {exc}", file=sys.stderr)
-        order = first(detail, "orderDetails", "OrderDetails")
+        order = first(detail, "order_details", "orderDetails", "OrderDetails")
         candidates = items_from(order if order is not None else detail)
         if not candidates:
             candidates = items_from(row)
