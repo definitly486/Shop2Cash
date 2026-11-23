@@ -115,12 +115,21 @@ def normalize_item(item: dict) -> dict | None:
     }
 
 def unwrap_history(payload: dict) -> list[dict]:
-    data = payload.get("data", payload.get("Data", {}))
-    if isinstance(data, dict):
-        rows = data.get("items", data.get("Items", []))
-        if isinstance(rows, list):
-            return [x for x in rows if isinstance(x, dict)]
+    # Основной формат подтверждён исходным AuchanReverseEngineering:
+    # {"data":{"items":[...]}}. Дополнительно принимаем варианты обёрток API.
+    containers = [payload]
+    for key in ("data", "Data", "result", "Result", "response", "Response"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+    for container in containers:
+        for key in ("items", "Items", "transactions", "Transactions",
+                    "purchases", "Purchases", "history", "History"):
+            rows = container.get(key)
+            if isinstance(rows, list):
+                return [x for x in rows if isinstance(x, dict)]
     return []
+
 
 def total_count(payload: dict):
     meta = payload.get("meta", payload.get("Meta", {}))
@@ -210,8 +219,30 @@ def main():
         parser.error("--limit должен быть в диапазоне 1..10")
     client = AuchanClient(load_token())
     history, rows = fetch_all(client, args.limit)
+    api_total = total_count(history)
+    if not rows:
+        top_keys = ", ".join(map(str, history.keys()))
+        data = history.get("data", history.get("Data", {}))
+        data_keys = ", ".join(map(str, data.keys())) if isinstance(data, dict) else type(data).__name__
+        raise RuntimeError(
+            "API АШАН вернул пустой список записей. "
+            f"meta.pagination.total={api_total!r}; "
+            f"ключи ответа=[{top_keys}]; ключи data=[{data_keys}]. "
+            "Сверьте ответ API с AuchanReverseEngineering."
+        )
     receipts = normalize_receipts(client, rows, not args.no_details)
-    output = {"source": "AUCHAN", "history_count": len(rows), "receipts": receipts}
+    if not receipts:
+        sample_keys = ", ".join(map(str, rows[0].keys())) if rows else "нет записей"
+        raise RuntimeError(
+            "История АШАН получена, но не удалось извлечь номера чеков. "
+            f"Поля первой записи: [{sample_keys}]."
+        )
+    output = {
+        "source": "AUCHAN",
+        "history_count": len(rows),
+        "api_total": api_total,
+        "receipts": receipts,
+    }
     if args.json_path:
         path = Path(args.json_path).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
