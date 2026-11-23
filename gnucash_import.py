@@ -150,9 +150,12 @@ def load_receipts(path):
             raise ValueError("В файле не найден корректный JSON с покупками.")
 
     if isinstance(data, dict):
+        auchan_receipts = data.get("receipts")
+        if data.get("source") == "AUCHAN" and isinstance(auchan_receipts, list):
+            return auchan_receipts
         purchases = data.get("purchases")
         if not isinstance(purchases, list):
-            raise ValueError("В JSON SPAR отсутствует массив purchases.")
+            raise ValueError("В JSON отсутствует массив purchases или receipts.")
         return [normalize_spar_purchase(item) for item in purchases]
     if isinstance(data, list):
         return data
@@ -332,6 +335,10 @@ def receipt_description(receipt):
         address = str(receipt.get("store_address") or "").strip()
         suffix = f" ({address})" if address else ""
         return f"SPAR — покупка #{purchase_id}{suffix}"
+    if receipt.get("source") == "AUCHAN":
+        check_num = str(receipt.get("checkNum") or "").removeprefix("AUCHAN-")
+        store = str(receipt.get("nameTc") or "АШАН").strip()
+        return f"АШАН — чек №AUCHAN-{check_num} ({store})"
     return f"Пятёрочка — чек №{receipt.get('checkNum')} (X5 Club)"
 
 def add_split(parent, account_id, amount_cents, memo=""):
@@ -491,11 +498,11 @@ def create_receipt_transaction(root, receipt, bank, mapped):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("Импорт SPAR + X5 Club в GnuCash")
+        self.root.title("Импорт SPAR + X5 Club + АШАН в GnuCash")
         self.root.geometry("1050x720")
         self.gnucash_path = tk.StringVar()
         self.json_path = tk.StringVar()
-        self.status = tk.StringVar(value="Выберите файл GnuCash и файл с чеками (SPAR или X5).")
+        self.status = tk.StringVar(value="Выберите файл GnuCash и JSON с чеками SPAR, X5 Club или АШАН.")
         self.ozon_card_var = tk.BooleanVar(value=False)
         self.analysis = None
         self.build_ui()
@@ -520,15 +527,17 @@ class App:
         ttk.Entry(outer, textvariable=self.json_path).grid(row=1, column=1, sticky="ew", padx=6)
         ttk.Button(outer, text="Обзор…", command=self.pick_json).grid(row=1, column=2)
 
-        # Две кнопки загрузки: SPAR и X5 Club
+        # Три источника: SPAR, X5 Club и АШАН.
         btn_frame = ttk.Frame(outer)
         btn_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 3))
-        btn_frame.columnconfigure(0, weight=1)
-        btn_frame.columnconfigure(1, weight=1)
+        for column in range(3):
+            btn_frame.columnconfigure(column, weight=1)
         self.fetch_spar_btn = ttk.Button(btn_frame, text="Загрузить из SPAR", command=self.fetch_spar)
         self.fetch_spar_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self.fetch_x5_btn = ttk.Button(btn_frame, text="Загрузить из X5 Club", command=self.fetch_x5)
-        self.fetch_x5_btn.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.fetch_x5_btn.grid(row=0, column=1, sticky="ew", padx=4)
+        self.fetch_auchan_btn = ttk.Button(btn_frame, text="Загрузить из АШАН", command=self.fetch_auchan)
+        self.fetch_auchan_btn.grid(row=0, column=2, sticky="ew", padx=(4, 0))
 
         ttk.Checkbutton(
             outer,
@@ -536,7 +545,7 @@ class App:
             variable=self.ozon_card_var,
             command=self.on_payment_option_changed,
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=4)
-        ttk.Button(outer, text="Проверить чеки (SPAR / X5)", command=self.analyze).grid(row=4, column=0, columnspan=3, sticky="ew", pady=(3, 2))
+        ttk.Button(outer, text="Проверить чеки (SPAR / X5 / АШАН)", command=self.analyze).grid(row=4, column=0, columnspan=3, sticky="ew", pady=(3, 2))
         ttk.Button(outer, text="Подготовить импорт в GnuCash", command=self.analyze_gnucash).grid(row=5, column=0, columnspan=3, sticky="ew", pady=(2, 8))
         self.info = tk.Text(outer, height=8, wrap="word")
         self.info.grid(row=6, column=0, columnspan=3, sticky="nsew", pady=5)
@@ -582,6 +591,7 @@ class App:
             return
         self.fetch_spar_btn.config(state="disabled")
         self.fetch_x5_btn.config(state="disabled")
+        self.fetch_auchan_btn.config(state="disabled")
         self.status.set("Загрузка покупок из SPAR...")
         self.log("Запуск клиента SPAR: sync --json ...")
         threading.Thread(target=self._fetch_spar_worker, args=(script,), daemon=True).start()
@@ -632,6 +642,7 @@ class App:
     def _fetch_spar_done(self, output_path, count, error):
         self.fetch_spar_btn.config(state="normal")
         self.fetch_x5_btn.config(state="normal")
+        self.fetch_auchan_btn.config(state="normal")
         if error:
             self.log("Ошибка загрузки SPAR:")
             self.log(error)
@@ -652,6 +663,7 @@ class App:
             return
         self.fetch_spar_btn.config(state="disabled")
         self.fetch_x5_btn.config(state="disabled")
+        self.fetch_auchan_btn.config(state="disabled")
         self.status.set("Загрузка чеков из X5 Club...")
         self.log("Запуск x5_api.py --json ...")
         threading.Thread(
@@ -697,6 +709,7 @@ class App:
     def _fetch_x5_done(self, output_path, count, error):
         self.fetch_spar_btn.config(state="normal")
         self.fetch_x5_btn.config(state="normal")
+        self.fetch_auchan_btn.config(state="normal")
         if error:
             self.log("Ошибка загрузки X5:")
             self.log(error)
@@ -707,6 +720,60 @@ class App:
         self.log(f"Загрузка завершена: получено чеков — {count}.")
         self.log(f"JSON сохранён во временный файл: {output_path}")
         self.status.set(f"Из X5 Club загружено чеков: {count}. Запускаю проверку...")
+        self.analyze()
+
+    def fetch_auchan(self):
+        """Загружает историю и подробности чеков АШАН из сохранённой SMS-сессии."""
+        script = Path(__file__).resolve().with_name("auchan_api.py")
+        if not script.is_file():
+            messagebox.showerror("Клиент АШАН не найден", f"Не найден файл скрипта:\\n{script}")
+            return
+        self.fetch_spar_btn.config(state="disabled")
+        self.fetch_x5_btn.config(state="disabled")
+        self.fetch_auchan_btn.config(state="disabled")
+        self.status.set("Загрузка чеков из АШАН...")
+        self.log("Запуск auchan_api.py (история + детали чеков)...")
+        threading.Thread(target=self._fetch_auchan_worker, args=(script,), daemon=True).start()
+
+    def _fetch_auchan_worker(self, script):
+        output_path = None
+        try:
+            fd, output_path = tempfile.mkstemp(prefix="auchan_receipts_", suffix=".json")
+            os.close(fd)
+            result = subprocess.run(
+                [sys.executable, str(script), "--json", output_path],
+                cwd=str(script.parent), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=900,
+            )
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout or "Нет подробностей об ошибке.").strip()[-6000:])
+            data = json.loads(Path(output_path).read_text(encoding="utf-8"))
+            receipts = data.get("receipts") if isinstance(data, dict) else None
+            if not isinstance(receipts, list):
+                raise RuntimeError("auchan_api.py не вернул массив receipts.")
+            self.root.after(0, self._fetch_auchan_done, output_path, len(receipts), None)
+        except Exception as exc:
+            if output_path:
+                try:
+                    os.unlink(output_path)
+                except OSError:
+                    pass
+            self.root.after(0, self._fetch_auchan_done, None, 0, str(exc))
+
+    def _fetch_auchan_done(self, output_path, count, error):
+        self.fetch_spar_btn.config(state="normal")
+        self.fetch_x5_btn.config(state="normal")
+        self.fetch_auchan_btn.config(state="normal")
+        if error:
+            self.log("Ошибка загрузки АШАН:")
+            self.log(error)
+            self.status.set("Не удалось загрузить чеки из АШАН.")
+            messagebox.showerror("Ошибка загрузки АШАН", error)
+            return
+        self.json_path.set(output_path)
+        self.log(f"Загрузка завершена: получено чеков АШАН — {count}.")
+        self.log(f"JSON сохранён во временный файл: {output_path}")
+        self.status.set(f"Из АШАН загружено чеков: {count}. Запускаю проверку...")
         self.analyze()
 
     def pick_gnucash(self):
@@ -879,9 +946,11 @@ class App:
             self.log(f"Категорий для сопоставления: {len(children)}")
 
             is_spar = any(r.get("source") == "SPAR" for r in receipts)
-            if is_spar:
+            is_auchan = any(r.get("source") == "AUCHAN" for r in receipts)
+            if is_spar or is_auchan:
                 selected = receipts
-                self.log("Источник: SPAR. Все покупки проверяются; способ оплаты API не используется.")
+                source_name = "АШАН" if is_auchan else "SPAR"
+                self.log(f"Источник: {source_name}. Все чеки проверяются; способ оплаты API не используется.")
             else:
                 selected = [r for r in receipts
                             if receipt_payment_method(r) == "************7961"]
