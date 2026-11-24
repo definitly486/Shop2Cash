@@ -532,7 +532,7 @@ class App:
         self.root = root
         self.root.title("Импорт SPAR + X5 Club + АШАН в GnuCash")
         self.root.geometry("1050x720")
-        self.gnucash_path = tk.StringVar()
+        self.gnucash_path = tk.StringVar(value="/ntfs-2TB/gnucash/definitly.gnucash")
         self.json_path = tk.StringVar()
         self.status = tk.StringVar(value="Выберите файл GnuCash и JSON с чеками SPAR, X5 Club или АШАН.")
         self.ozon_card_var = tk.BooleanVar(value=False)
